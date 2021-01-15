@@ -1,0 +1,156 @@
+stages:
+  - test
+  - build
+  - dockerize
+  - deploy
+  - report
+
+test:
+  stage: test
+  image: node:12.18-alpine
+
+  only:
+    - master
+    - development
+
+  before_script:
+    - yarn install
+
+  script:
+    - yarn test:coverage
+
+  artifacts:
+    when: always
+    paths:
+      - coverage/
+      - junit.xml
+
+    reports:
+      junit: junit.xml
+
+test-no-cache:
+  stage: test
+  image: node:12.18-alpine
+
+  except:
+    - master
+    - development
+
+  before_script:
+    - yarn install
+
+  script:
+    - yarn test:coverage
+
+  artifacts:
+    when: always
+    paths:
+      - coverage/
+      - junit.xml
+
+    reports:
+      junit: junit.xml
+
+build-development:
+  stage: build
+  image: node:12.18-alpine
+
+  only:
+    - development
+
+  before_script:
+    - yarn install
+
+  script:
+    - echo "$DOT_ENV_STAGING" > "$(pwd)/.env"
+    - yarn tailwind:prod
+    - yarn build
+
+  artifacts:
+    paths:
+      - build/
+
+build-master:
+  stage: build
+  image: node:12.18-alpine
+
+  only:
+    - master
+
+  before_script:
+    - yarn install
+
+  script:
+    - echo "$DOT_ENV_PRODUCTION" > "$(pwd)/.env"
+    - yarn tailwind:prod
+    - yarn build
+
+  artifacts:
+    paths:
+      - build/
+
+dockerize:
+  stage: dockerize
+  image: docker:19.03.13
+
+  only:
+    - master
+    - development
+
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_TOKEN $CI_REGISTRY
+
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE .
+    - docker tag $CI_REGISTRY_IMAGE $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
+    - docker push $CI_REGISTRY_IMAGE
+
+deploy-master:
+  stage: deploy
+  image: docker:19.03.13
+
+  only:
+    - master
+
+  script:
+    - docker service update --image $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG $SWARM_PRODUCTION_SERVICE_NAME
+
+  environment:
+    name: production
+    url: http://$SERVER_IP:$SERVER_PRODUCTION_PORT
+
+deploy-development:
+  stage: deploy
+  image: docker:19.03.13
+
+  only:
+    - development
+
+  script:
+    - docker service update --image $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG $SWARM_STAGING_SERVICE_NAME
+
+  environment:
+    name: staging
+    url: http://$SERVER_IP:$SERVER_STAGING_PORT
+
+report:
+  stage: report
+  image: ubuntu:20.04
+  when: always
+
+  before_script:
+    - 'which ssh-agent || ( apt-get update -y && apt-get install openssh-client -y )'
+    - eval $(ssh-agent -s)
+    - ssh-add <(echo "$SSH_PRIVATE_KEY")
+    - mkdir -p ~/.ssh
+    - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+
+  script:
+    - mv coverage/lcov-report reports/
+    - ssh ci_user@$CI_SERVER_HOST "rm -rf /var/www/html/$CI_PROJECT_NAME/$CI_COMMIT_BRANCH/"
+    - ssh ci_user@$CI_SERVER_HOST "mkdir -p /var/www/html/$CI_PROJECT_NAME/$CI_COMMIT_BRANCH/"
+    - scp -r reports/ ci_user@$SERVER_IP:/var/www/html/$CI_PROJECT_NAME/$CI_COMMIT_BRANCH
+
+  environment:
+    name: reports
+    url: http://$SERVER_IP:$SERVER_REPORT_PORT/$CI_PROJECT_NAME/$CI_COMMIT_BRANCH/reports/
